@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { sessionStore } from "@/lib/sessionStore";
 
 export async function GET() {
-  return NextResponse.json({ sessions: sessionStore.list() });
+  const sessions = await sessionStore.list();
+  return NextResponse.json({ sessions });
 }
 
 export async function POST(req: Request) {
@@ -15,6 +16,6 @@ export async function POST(req: Request) {
   } catch {
     // body is optional
   }
-  const session = sessionStore.create(name);
+  const session = await sessionStore.create(name);
   return NextResponse.json({ session });
 }

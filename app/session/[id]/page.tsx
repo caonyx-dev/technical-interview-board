@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export default async function SessionPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = sessionStore.get(id);
+  const session = await sessionStore.get(id);
   if (!session) notFound();
 
   const isInterviewer = await getInterviewerFromCookies();

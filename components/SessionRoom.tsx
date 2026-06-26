@@ -7,6 +7,18 @@ import { WebsocketProvider } from "y-websocket";
 
 const PythonEditor = dynamic(() => import("./PythonEditor"), { ssr: false });
 
+function resolveYjsUrl(): string {
+  if (typeof window === "undefined") return "";
+  const configured = process.env.NEXT_PUBLIC_YJS_URL;
+  if (configured && configured.length > 0) {
+    // NEXT_PUBLIC_YJS_URL should be the base, e.g. wss://ws.example.com — WebsocketProvider
+    // appends `/<sessionId>` itself, so we hand it a `…/yjs` base.
+    return configured.endsWith("/yjs") ? configured : `${configured.replace(/\/$/, "")}/yjs`;
+  }
+  const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${window.location.host}/yjs`;
+}
+
 type Role = "interviewer" | "interviewee";
 
 type Status = "connecting" | "connected" | "disconnected" | "unavailable";
@@ -17,9 +29,7 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
 
   const { doc, provider, problemText, codeText } = useMemo(() => {
     const doc = new Y.Doc();
-    const wsUrl = typeof window === "undefined"
-      ? ""
-      : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/yjs`;
+    const wsUrl = resolveYjsUrl();
     const provider = new WebsocketProvider(wsUrl, sessionId, doc, { connect: false });
     const problemText = doc.getText("problem");
     const codeText = doc.getText("code");

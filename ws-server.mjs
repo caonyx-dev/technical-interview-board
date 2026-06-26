@@ -1,25 +1,23 @@
+// Standalone y-websocket server for production. Deploy this on Render / Railway / Fly.
+//
+// Env vars:
+//   PORT                      — port to listen on (default 1234)
+//   JWT_SECRET                — same secret as the Next.js app; lets us identify interviewers
+//   ALLOWED_ORIGIN (optional) — if set, only accept WS upgrades whose Origin matches
+//
+// Clients connect to:  wss://<host>/yjs/<sessionId>
+// Configure NEXT_PUBLIC_YJS_URL on the Next.js side to point at this host.
+
 import { createServer } from "node:http";
 import { parse } from "node:url";
 import { WebSocketServer } from "ws";
 import { setupWSConnection } from "y-websocket/bin/utils";
 import { jwtVerify } from "jose";
-import nextEnv from "@next/env";
-import next from "next";
 
-const { loadEnvConfig } = nextEnv;
-const dev = process.env.NODE_ENV !== "production";
-loadEnvConfig(process.cwd(), dev);
-
-const port = Number(process.env.PORT ?? 3002);
-const app = next({ dev, hostname: "localhost", port });
-const handle = app.getRequestHandler();
-
-await app.prepare();
-
-const httpServer = createServer((req, res) => handle(req, res, parse(req.url, true)));
-const wss = new WebSocketServer({ noServer: true });
-
+const port = Number(process.env.PORT ?? 1234);
+const allowedOrigin = process.env.ALLOWED_ORIGIN;
 const COOKIE_NAME = "caonyx_interview_session";
+
 const intervieweeSlots = new Set();
 
 function parseCookies(header) {
@@ -53,7 +51,26 @@ function reject(socket, status, msg) {
   socket.destroy();
 }
 
+const httpServer = createServer((req, res) => {
+  if (req.url === "/healthz") {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
 httpServer.on("upgrade", async (req, socket, head) => {
+  if (allowedOrigin) {
+    const origin = req.headers.origin;
+    if (origin && origin !== allowedOrigin) {
+      return reject(socket, 403, "Forbidden Origin");
+    }
+  }
+
   let pathname;
   try {
     pathname = parse(req.url, true).pathname ?? "";
@@ -63,7 +80,6 @@ httpServer.on("upgrade", async (req, socket, head) => {
   }
 
   if (!pathname.startsWith("/yjs/")) {
-    if (pathname.startsWith("/_next/")) return;
     socket.destroy();
     return;
   }
@@ -90,5 +106,5 @@ httpServer.on("upgrade", async (req, socket, head) => {
 });
 
 httpServer.listen(port, () => {
-  console.log(`Caonyx Interview ready on http://localhost:${port}`);
+  console.log(`Caonyx Interview WS server listening on :${port}`);
 });
