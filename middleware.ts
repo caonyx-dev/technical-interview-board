@@ -19,6 +19,13 @@ async function isInterviewer(req: NextRequest): Promise<boolean> {
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+
+  // Per-session state polling/writing is open to anyone with the link.
+  // The route handler enforces the interviewer-only rule for problem edits.
+  if (pathname.startsWith("/api/sessions/") && pathname.endsWith("/state")) {
+    return NextResponse.next();
+  }
+
   const ok = await isInterviewer(req);
 
   if (pathname.startsWith("/dashboard") || pathname.startsWith("/api/sessions")) {
