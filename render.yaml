@@ -1,0 +1,29 @@
+# Render.com Blueprint — deploys ws-server.mjs as a long-lived Node service.
+#
+# Usage:
+#   1. Push this file to a branch.
+#   2. https://render.com → New + → Blueprint → connect this repo, pick the branch.
+#   3. Render reads this file and creates the service.
+#   4. After the first deploy, open the service in Render and set:
+#        - JWT_SECRET           (the same value as the one on Vercel)
+#        - ALLOWED_ORIGIN       (optional; e.g. https://technical-interview-board.vercel.app)
+#   5. Copy the service URL (e.g. https://caonyx-interview-ws.onrender.com).
+#   6. On Vercel, set NEXT_PUBLIC_YJS_URL=wss://caonyx-interview-ws.onrender.com
+#      (note the wss, not https). Redeploy Vercel.
+
+services:
+  - type: web
+    name: caonyx-interview-ws
+    runtime: node
+    plan: free
+    region: ohio
+    buildCommand: npm install
+    startCommand: node ws-server.mjs
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: JWT_SECRET
+        sync: false
+      - key: ALLOWED_ORIGIN
+        sync: false
