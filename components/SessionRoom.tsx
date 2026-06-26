@@ -43,13 +43,10 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
     const onConnectionError = () => {
       setFailures((n) => n + 1);
     };
-    const onConnectionClose = (e?: CloseEvent) => {
-      // Server uses HTTP-status-bearing rejections before WS handshake completes.
-      // After WS opens, an immediate close with code 1006 + never having connected → likely unavailable.
+    const onConnectionClose = (e: CloseEvent | null) => {
       if (!connectedOnceRef.current) {
         setFailures((n) => n + 1);
       }
-      // Some servers send specific close codes; treat 4409 / 4404 as fatal if we wired them later.
       if (e && (e.code === 4409 || e.code === 4404)) {
         setStatus("unavailable");
         provider.disconnect();
