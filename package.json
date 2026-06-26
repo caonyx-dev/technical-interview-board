@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node server.mjs",
+    "dev": "next dev -p 3002",
     "build": "next build",
-    "start": "NODE_ENV=production node server.mjs",
+    "start": "next start -p 3002",
     "lint": "next lint"
   },
   "dependencies": {
@@ -16,19 +16,13 @@
     "nanoid": "^5.0.7",
     "next": "^15.0.3",
     "react": "^19.0.0-rc-66855b96-20241106",
-    "react-dom": "^19.0.0-rc-66855b96-20241106",
-    "ws": "^8.18.0",
-    "y-monaco": "^0.1.6",
-    "y-protocols": "^1.0.6",
-    "y-websocket": "^2.0.4",
-    "yjs": "^13.6.20"
+    "react-dom": "^19.0.0-rc-66855b96-20241106"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.0.0-beta.4",
     "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/ws": "^8.5.13",
     "tailwindcss": "^4.0.0-beta.4",
     "typescript": "^5.6.3"
   }
