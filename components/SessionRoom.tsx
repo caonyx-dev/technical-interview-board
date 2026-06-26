@@ -1,90 +1,150 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import * as Y from "yjs";
-import { WebsocketProvider } from "y-websocket";
+import { nanoid } from "nanoid";
+import type { SessionState, Field } from "@/lib/stateStore";
 
 const PythonEditor = dynamic(() => import("./PythonEditor"), { ssr: false });
 
-function resolveYjsUrl(): string {
-  if (typeof window === "undefined") return "";
-  const configured = process.env.NEXT_PUBLIC_YJS_URL;
-  if (configured && configured.length > 0) {
-    // NEXT_PUBLIC_YJS_URL should be the base, e.g. wss://ws.example.com — WebsocketProvider
-    // appends `/<sessionId>` itself, so we hand it a `…/yjs` base.
-    return configured.endsWith("/yjs") ? configured : `${configured.replace(/\/$/, "")}/yjs`;
-  }
-  const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${window.location.host}/yjs`;
-}
-
 type Role = "interviewer" | "interviewee";
+type Status = "connecting" | "online" | "offline" | "unavailable";
 
-type Status = "connecting" | "connected" | "disconnected" | "unavailable";
+const POLL_MS = 800;
+const POST_DEBOUNCE_MS = 250;
+const LOCAL_OWNERSHIP_GRACE_MS = 1500;
 
 export default function SessionRoom({ sessionId, role }: { sessionId: string; role: Role }) {
   const [status, setStatus] = useState<Status>("connecting");
-  const [failures, setFailures] = useState(0);
+  const [problem, setProblem] = useState("");
+  const [code, setCode] = useState("");
 
-  const { doc, provider, problemText, codeText } = useMemo(() => {
-    const doc = new Y.Doc();
-    const wsUrl = resolveYjsUrl();
-    const provider = new WebsocketProvider(wsUrl, sessionId, doc, { connect: false });
-    const problemText = doc.getText("problem");
-    const codeText = doc.getText("code");
-    return { doc, provider, problemText, codeText };
-  }, [sessionId]);
+  const clientIdRef = useRef<string>("");
+  if (!clientIdRef.current) clientIdRef.current = nanoid(8);
 
-  const connectedOnceRef = useRef(false);
+  // For each field: when we last sent an edit. Used to ignore our own echo.
+  const lastLocalEditAtRef = useRef<Record<Field, number>>({ problem: 0, code: 0 });
+  // For each field: the server timestamp we last applied locally.
+  const lastAppliedAtRef = useRef<Record<Field, number>>({ problem: 0, code: 0 });
+  // Pending POSTs (debounced)
+  const postTimersRef = useRef<Record<Field, ReturnType<typeof setTimeout> | null>>({
+    problem: null,
+    code: null,
+  });
+  // Latest text we want to send per field (the timer captures whatever's here at fire time).
+  const pendingTextRef = useRef<Record<Field, string>>({ problem: "", code: "" });
 
-  useEffect(() => {
-    const onStatus = (e: { status: "connecting" | "connected" | "disconnected" }) => {
-      if (e.status === "connected") {
-        connectedOnceRef.current = true;
-        setFailures(0);
-        setStatus("connected");
-      } else if (e.status === "connecting") {
-        setStatus((prev) => (prev === "connected" ? "connected" : "connecting"));
-      } else {
-        setStatus("disconnected");
-      }
-    };
-    const onConnectionError = () => {
-      setFailures((n) => n + 1);
-    };
-    const onConnectionClose = (e: CloseEvent | null) => {
-      if (!connectedOnceRef.current) {
-        setFailures((n) => n + 1);
-      }
-      if (e && (e.code === 4409 || e.code === 4404)) {
+  const consecutiveErrorsRef = useRef(0);
+
+  const applyRemoteState = useCallback((state: SessionState) => {
+    const now = Date.now();
+    const myId = clientIdRef.current;
+
+    (["problem", "code"] as Field[]).forEach((field) => {
+      const at = field === "problem" ? state.problemAt : state.codeAt;
+      const by = field === "problem" ? state.problemBy : state.codeBy;
+      const text = field === "problem" ? state.problem : state.code;
+      if (at <= lastAppliedAtRef.current[field]) return;
+      // Skip our own echoes while we're still actively typing the same field.
+      const stillTyping = now - lastLocalEditAtRef.current[field] < LOCAL_OWNERSHIP_GRACE_MS;
+      if (by === myId && stillTyping) return;
+      lastAppliedAtRef.current[field] = at;
+      if (field === "problem") setProblem(text);
+      else setCode(text);
+    });
+  }, []);
+
+  const pollOnce = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/state`, { cache: "no-store" });
+      if (res.status === 404) {
         setStatus("unavailable");
-        provider.disconnect();
+        return false;
+      }
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const data = (await res.json()) as { state: SessionState };
+      applyRemoteState(data.state);
+      consecutiveErrorsRef.current = 0;
+      setStatus("online");
+      return true;
+    } catch {
+      consecutiveErrorsRef.current += 1;
+      if (consecutiveErrorsRef.current >= 2) setStatus("offline");
+      return false;
+    }
+  }, [sessionId, applyRemoteState]);
+
+  // Initial fetch + polling loop
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      const keepGoing = await pollOnce();
+      if (cancelled) return;
+      if (keepGoing || consecutiveErrorsRef.current > 0) {
+        timer = setTimeout(tick, POLL_MS);
       }
     };
-
-    provider.on("status", onStatus);
-    provider.on("connection-error", onConnectionError);
-    provider.on("connection-close", onConnectionClose);
-    provider.connect();
-
+    tick();
     return () => {
-      provider.off("status", onStatus);
-      provider.off("connection-error", onConnectionError);
-      provider.off("connection-close", onConnectionClose);
-      provider.disconnect();
-      provider.destroy();
-      doc.destroy();
+      cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [provider, doc]);
+  }, [pollOnce]);
 
-  // After several failures without ever connecting, surface "unavailable".
+  const schedulePost = useCallback(
+    (field: Field, text: string) => {
+      pendingTextRef.current[field] = text;
+      lastLocalEditAtRef.current[field] = Date.now();
+      if (postTimersRef.current[field]) clearTimeout(postTimersRef.current[field]!);
+      postTimersRef.current[field] = setTimeout(async () => {
+        postTimersRef.current[field] = null;
+        const payload = {
+          field,
+          text: pendingTextRef.current[field],
+          clientId: clientIdRef.current,
+        };
+        try {
+          const res = await fetch(`/api/sessions/${sessionId}/state`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+            cache: "no-store",
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { state: SessionState };
+            // Mark this server timestamp as applied so polling doesn't redundantly re-set us.
+            lastAppliedAtRef.current[field] =
+              field === "problem" ? data.state.problemAt : data.state.codeAt;
+            consecutiveErrorsRef.current = 0;
+            setStatus("online");
+          } else if (res.status === 403) {
+            // interviewee tried to edit problem — silently ignore (UI already prevents this)
+          } else if (res.status === 404) {
+            setStatus("unavailable");
+          } else {
+            consecutiveErrorsRef.current += 1;
+            if (consecutiveErrorsRef.current >= 2) setStatus("offline");
+          }
+        } catch {
+          consecutiveErrorsRef.current += 1;
+          if (consecutiveErrorsRef.current >= 2) setStatus("offline");
+        }
+      }, POST_DEBOUNCE_MS);
+    },
+    [sessionId],
+  );
+
+  // Cleanup pending timers on unmount
   useEffect(() => {
-    if (failures >= 3 && !connectedOnceRef.current) {
-      setStatus("unavailable");
-      provider.disconnect();
-    }
-  }, [failures, provider]);
+    return () => {
+      (["problem", "code"] as Field[]).forEach((f) => {
+        const t = postTimersRef.current[f];
+        if (t) clearTimeout(t);
+      });
+    };
+  }, []);
 
   if (status === "unavailable") {
     return (
@@ -92,7 +152,7 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
         <div className="max-w-md text-center">
           <h1 className="text-xl font-semibold mb-2">Session unavailable</h1>
           <p className="text-zinc-400 text-sm">
-            This session either does not exist, has ended, or the candidate slot is already in use.
+            This session either does not exist or has ended.
           </p>
         </div>
       </main>
@@ -107,7 +167,9 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium">Caonyx Interview</span>
           <span className="text-xs text-zinc-500">·</span>
-          <span className="text-xs text-zinc-500">{interviewee ? "Candidate view" : "Interviewer view"}</span>
+          <span className="text-xs text-zinc-500">
+            {interviewee ? "Candidate view" : "Interviewer view"}
+          </span>
         </div>
         <StatusDot status={status} />
       </header>
@@ -120,11 +182,14 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
           </div>
           <div className="flex-1 min-h-0">
             <PythonEditor
-              yText={problemText}
-              awareness={provider.awareness}
+              value={problem}
               readOnly={interviewee}
               wordWrap
               fontSize={13}
+              onChange={interviewee ? undefined : (next) => {
+                setProblem(next);
+                schedulePost("problem", next);
+              }}
             />
           </div>
         </section>
@@ -135,11 +200,13 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
           </div>
           <div className="flex-1 min-h-0">
             <PythonEditor
-              yText={codeText}
-              awareness={provider.awareness}
-              readOnly={false}
+              value={code}
               showMinimap
               fontSize={14}
+              onChange={(next) => {
+                setCode(next);
+                schedulePost("code", next);
+              }}
             />
           </div>
         </section>
@@ -151,8 +218,8 @@ export default function SessionRoom({ sessionId, role }: { sessionId: string; ro
 function StatusDot({ status }: { status: Status }) {
   const map: Record<Status, { color: string; label: string }> = {
     connecting: { color: "bg-amber-400", label: "Connecting…" },
-    connected: { color: "bg-teal-400", label: "Connected" },
-    disconnected: { color: "bg-rose-500", label: "Reconnecting…" },
+    online: { color: "bg-teal-400", label: "Synced" },
+    offline: { color: "bg-rose-500", label: "Reconnecting…" },
     unavailable: { color: "bg-zinc-600", label: "Unavailable" },
   };
   const { color, label } = map[status];

@@ -2,13 +2,11 @@
 
 import { useEffect, useRef } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
-import { MonacoBinding } from "y-monaco";
-import type * as Y from "yjs";
-import type { Awareness } from "y-protocols/awareness";
+import type { editor as MonacoEditor } from "monaco-editor";
 
 type Props = {
-  yText: Y.Text;
-  awareness: Awareness;
+  value: string;
+  onChange?: (next: string) => void;
   readOnly?: boolean;
   wordWrap?: boolean;
   showMinimap?: boolean;
@@ -16,27 +14,31 @@ type Props = {
 };
 
 export default function PythonEditor({
-  yText,
-  awareness,
+  value,
+  onChange,
   readOnly = false,
   wordWrap = false,
   showMinimap = false,
   fontSize = 14,
 }: Props) {
-  const bindingRef = useRef<MonacoBinding | null>(null);
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const ignoreNextChangeRef = useRef(false);
 
+  // Apply incoming `value` without losing the user's cursor when the change came
+  // from polling (not from local typing).
   useEffect(() => {
-    return () => {
-      bindingRef.current?.destroy();
-      bindingRef.current = null;
-    };
-  }, []);
+    const ed = editorRef.current;
+    if (!ed) return;
+    const current = ed.getValue();
+    if (current === value) return;
+    const sel = ed.getSelection();
+    ignoreNextChangeRef.current = true;
+    ed.setValue(value);
+    if (sel) ed.setSelection(sel);
+  }, [value]);
 
   const onMount: OnMount = (editor) => {
-    const model = editor.getModel();
-    if (!model) return;
-    bindingRef.current?.destroy();
-    bindingRef.current = new MonacoBinding(yText, model, new Set([editor]), awareness);
+    editorRef.current = editor;
   };
 
   return (
@@ -44,7 +46,15 @@ export default function PythonEditor({
       height="100%"
       defaultLanguage="python"
       theme="vs-dark"
+      value={value}
       onMount={onMount}
+      onChange={(next) => {
+        if (ignoreNextChangeRef.current) {
+          ignoreNextChangeRef.current = false;
+          return;
+        }
+        onChange?.(next ?? "");
+      }}
       options={{
         readOnly,
         wordWrap: wordWrap ? "on" : "off",
